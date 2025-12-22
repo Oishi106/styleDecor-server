@@ -6,7 +6,7 @@ const { ObjectId } = require('mongodb')
 const port = 3000
 require('dotenv').config()
 const Stripe = require('stripe')
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder')
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
 
 //middleware
 app.use(cors())
