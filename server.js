@@ -32,7 +32,7 @@ async function run() {
         const booking_payment_collection = db.collection("booking_payment")
         const users_collection = db.collection("users")
 
-        //services details api
+        //services  api
         app.get('/rooms', async (req, res) => {
             const query = {}
             const cursor = room_details_collection.find(query)
@@ -40,7 +40,35 @@ async function run() {
             res.send(result)
         })
 
-     
+        //users api
+        app.post('/users', async (req, res) => {
+            const { name, email } = req.body
+
+            if (!email) {
+                return res.status(400).send({ message: 'Email is required' })
+            }
+
+            const existingUser = await users_collection.findOne({ email })
+
+            if (existingUser) {
+                return res.send({ message: 'User already exists' })
+            }
+
+            const user = {
+                name,
+                email,
+                role: 'user',
+                createdAt: new Date()
+            }
+
+            const result = await users_collection.insertOne(user)
+            res.send(result)
+        })
+
+        app.get('/users', async (req, res) => {
+            const users = await users_collection.find().toArray()
+            res.send(users)
+        })
 
 
         //paymentbooking api
