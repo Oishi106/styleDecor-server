@@ -14,28 +14,28 @@ app.use(cors())
 app.use(express.json())
 //jwt verification middleware
 const verifyJWT = (req, res, next) => {
-  const authHeader = req.headers.authorization
+  const authHeader = req.headers.authorization;
 
   if (!authHeader) {
-    return res.status(401).send({ message: 'Unauthorized access' })
+    return res.status(401).send({ message: "Unauthorized" });
   }
 
-  const token = authHeader.split(' ')[1]
+  const token = authHeader.split(" ")[1];
 
   jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
     if (err) {
-      return res.status(401).send({ message: 'Invalid token' })
+      return res.status(403).send({ message: "Forbidden" });
     }
 
-    req.user = decoded   // { email, role }
-    next()
-  })
-}
+    req.decoded = decoded; // { email, role }
+    next();
+  });
+};
 
 
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.7xap9dx.mongodb.net/?appName=Cluster0`;
-  
+
 
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
@@ -50,7 +50,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     const db = client.db("smart_decor")
     const room_details_collection = db.collection("room_details")
@@ -372,33 +372,99 @@ async function run() {
 
 
 
-    app.get('/decorator/jobs', verifyJWT, verifyDecorator, async (req, res) => {
-      const email = req.user.email
+    app.get("/decorator/jobs", verifyJWT, async (req, res) => {
+      try {
+        const decoratorEmail = req.query.decoratorEmail;
 
-      const jobs = await booking_payment_collection.find({
-        decoratorEmail: email
-      }).toArray()
+        if (!decoratorEmail) {
+          return res.status(400).send({
+            message: "Decorator email is required"
+          });
+        }
 
-      res.send(jobs)
-    })
+        const jobs = await booking_payment_collection.find({
+          assignedDecoratorEmail: decoratorEmail
+        }).toArray();
+
+        res.send(jobs);
+      } catch (error) {
+        res.status(500).send({
+          message: "Failed to fetch decorator jobs"
+        });
+      }
+    });
+
+
+
+
+
     //
+
     app.patch(
       '/decorator/job-status/:id',
       verifyJWT,
       verifyDecorator,
       async (req, res) => {
 
-        const id = req.params.id
+        const bookingId = req.params.id
         const { status } = req.body
+        const decoratorEmail = req.user.email
+
+        const allowedStatuses = ['assigned', 'in-progress', 'completed']
+
+        if (!allowedStatuses.includes(status)) {
+          return res.status(400).send({ message: 'Invalid job status' })
+        }
+
+        const booking = await booking_payment_collection.findOne({
+          _id: new ObjectId(bookingId)
+        })
+
+        if (!booking) {
+          return res.status(404).send({ message: 'Booking not found' })
+        }
+
+        if (booking.decorator?.email !== decoratorEmail) {
+          return res.status(403).send({
+            message: 'Not your assigned job'
+          })
+        }
+
+        const validFlow = {
+          assigned: ['in-progress'],
+          'in-progress': ['completed'],
+          completed: []
+        }
+
+        if (!validFlow[booking.jobStatus]?.includes(status)) {
+          return res.status(400).send({
+            message: `Invalid status change from ${booking.jobStatus} to ${status}`
+          })
+        }
+
+        const updateData = {
+          jobStatus: status
+        }
+
+        if (status === 'in-progress') {
+          updateData.startedAt = new Date()
+        }
+
+        if (status === 'completed') {
+          updateData.completedAt = new Date()
+        }
 
         const result = await booking_payment_collection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { jobStatus: status } }
+          { _id: new ObjectId(bookingId) },
+          { $set: updateData }
         )
 
         res.send(result)
       }
     )
+
+
+
     //assign decorator to booking only through admin
     app.patch(
       '/bookings/assign-decorator/:id',
@@ -413,7 +479,6 @@ async function run() {
           return res.status(400).send({ message: 'Decorator email required' })
         }
 
-        // 1️⃣ Find booking
         const booking = await booking_payment_collection.findOne({
           _id: new ObjectId(bookingId)
         })
@@ -422,14 +487,12 @@ async function run() {
           return res.status(404).send({ message: 'Booking not found' })
         }
 
-        // 2️⃣ Ensure payment is completed
         if (booking.paymentStatus !== 'paid') {
           return res.status(400).send({
-            message: 'Cannot assign decorator before payment'
+            message: 'Payment not completed'
           })
         }
 
-        // 3️⃣ Find decorator
         const decorator = await users_collection.findOne({
           email: decoratorEmail,
           role: 'decorator'
@@ -437,11 +500,10 @@ async function run() {
 
         if (!decorator) {
           return res.status(404).send({
-            message: 'Decorator not found or not approved'
+            message: 'Decorator not found'
           })
         }
 
-        // 4️⃣ Assign decorator
         const result = await booking_payment_collection.updateOne(
           { _id: new ObjectId(bookingId) },
           {
@@ -459,6 +521,10 @@ async function run() {
         res.send(result)
       }
     )
+
+
+
+
     //api for decorator dashboard
     app.get(
       '/decorator/jobs',
@@ -496,7 +562,7 @@ async function run() {
           return res.status(400).send({ message: 'Invalid job status' })
         }
 
-        // 1️⃣ Find booking
+        // Find booking
         const booking = await booking_payment_collection.findOne({
           _id: new ObjectId(bookingId)
         })
@@ -505,14 +571,14 @@ async function run() {
           return res.status(404).send({ message: 'Booking not found' })
         }
 
-        // 2️⃣ Ensure booking is assigned to this decorator
+        //  Ensure booking is assigned to this decorator
         if (booking.decorator?.email !== decoratorEmail) {
           return res.status(403).send({
             message: 'Forbidden: Not your assigned job'
           })
         }
 
-        // 3️⃣ Validate status flow
+        // Validate status flow
         const currentStatus = booking.jobStatus
 
         const validFlow = {
@@ -527,7 +593,7 @@ async function run() {
           })
         }
 
-        // 4️⃣ Update job status
+        // Update job status
         const updateData = {
           jobStatus: status
         }
@@ -576,12 +642,7 @@ async function run() {
     //// create booking (payment pending)
     app.post('/bookings', verifyJWT, async (req, res) => {
       const emailFromToken = req.user.email
-      const {
-        name,
-        roomId,
-        roomName,
-        price
-      } = req.body
+      const { name, roomId, roomName, price } = req.body
 
       if (!emailFromToken || !roomId || !roomName || !price) {
         return res.status(400).send({
@@ -590,13 +651,19 @@ async function run() {
       }
 
       const bookingData = {
-        user: { name, emailFromToken },
+        user: {
+          name,
+          email: emailFromToken   //  FIXED
+        },
         roomId,
         roomName,
         price,
 
         paymentStatus: 'pending',
         transactionId: null,
+
+        jobStatus: 'pending',     //  ADD THIS
+        decorator: null,
 
         createdAt: new Date(),
         paidAt: null
@@ -605,6 +672,11 @@ async function run() {
       const result = await booking_payment_collection.insertOne(bookingData)
       res.send(result)
     })
+
+
+
+
+
     app.patch('/users/role/:id', verifyJWT, verifyAdmin, async (req, res) => {
       const id = req.params.id
       const { role } = req.body
@@ -625,7 +697,7 @@ async function run() {
         _id: new ObjectId(id)
       })
 
-      // ⛔ Prevent double payment
+      //  Prevent double payment
       if (existing?.paymentStatus === 'paid') {
         return res.status(400).send({ message: 'Payment already completed' })
       }
@@ -656,7 +728,7 @@ async function run() {
 
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
+    // await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
@@ -670,6 +742,11 @@ app.get('/', (req, res) => {
   res.send('hey bhai')
 })
 
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`)
-})
+// Vercel runs this as a Serverless Function; do not call listen() there.
+if (!process.env.VERCEL) {
+  app.listen(port, () => {
+    console.log(`Example app listening on port ${port}`)
+  })
+}
+
+module.exports = app
