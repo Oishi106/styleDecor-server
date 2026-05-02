@@ -1,44 +1,27 @@
-const express = require('express')
-const app = express()
-const cors = require('cors')
-const { MongoClient, ServerApiVersion } = require('mongodb');
-const { ObjectId } = require('mongodb')
-const jwt = require('jsonwebtoken')
-const port = 3000
-require('dotenv').config()
-const Stripe = require('stripe')
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
+const express = require('express');
+const app = express();
+const cors = require('cors');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const jwt = require('jsonwebtoken');
+require('dotenv').config();
 
-//middleware
-app.use(cors())
-app.use(express.json())
-//jwt verification middleware
-const verifyJWT = (req, res, next) => {
-  const authHeader = req.headers.authorization;
+const createAuthRouter = require('./auth.route');
+const { requireAuth } = require('./authMiddleware');
 
-  if (!authHeader) {
-    return res.status(401).send({ message: "Unauthorized" });
-  }
+const port = process.env.PORT || 3000;
+const Stripe = require('stripe');
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null;
 
-  const token = authHeader.split(" ")[1];
+if (!stripeSecretKey) {
+  console.warn('[config] STRIPE_SECRET_KEY is not set; payment endpoints will be unavailable');
+}
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-    if (err) {
-      return res.status(403).send({ message: "Forbidden" });
-    }
-
-    req.decoded = decoded; // { email, role }
-    next();
-  });
-};
-
-
+app.use(cors());
+app.use(express.json());
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.7xap9dx.mongodb.net/?appName=Cluster0`;
 
-
-
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -49,704 +32,428 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
-    // await client.connect();
+    const db = client.db("smart_decor");
+    const room_details_collection = db.collection("room_details");
+    const booking_payment_collection = db.collection("booking_payment");
+    const users_collection = db.collection("users");
+    const favourites_collection = db.collection("favourites");
+    const chat_collection = db.collection("conversations");
 
-    const db = client.db("smart_decor")
-    const room_details_collection = db.collection("room_details")
-    const booking_payment_collection = db.collection("booking_payment")
-    const users_collection = db.collection("users")
-
-
-    //admin verification middleware
     const verifyAdmin = async (req, res, next) => {
-      const email = req.user.email
-
-      const user = await users_collection.findOne({ email })
-
-      if (!user || user.role !== 'admin') {
-        return res.status(403).send({ message: 'Forbidden: Admin only' })
-      }
-
-      next()
-    }
-    //decorator middleware
-    const verifyDecorator = async (req, res, next) => {
-      const email = req.user.email
-
-      const user = await users_collection.findOne({ email })
-
-      if (!user || user.role !== 'decorator') {
-        return res.status(403).send({ message: 'Forbidden: Decorator only' })
-      }
-
-      next()
-    }
-
-
-
-
-
-    //for frontend to get logged in user info
-
-    app.get('/auth/me', verifyJWT, async (req, res) => {
-      const user = await users_collection.findOne(
-        { email: req.user.email },
-        { projection: { name: 1, email: 1, role: 1 } }
-      )
-
-      res.send(user)
-    })
-
-    // Alternative endpoint for /users/me
-    app.get('/users/me', verifyJWT, async (req, res) => {
-      const user = await users_collection.findOne(
-        { email: req.user.email },
-        { projection: { name: 1, email: 1, role: 1 } }
-      )
-
-      res.send(user)
-    })
-
-
-    // issue jwt
-    app.post('/auth/jwt', async (req, res) => {
-      const { email } = req.body
-
-      if (!email) {
-        return res.status(400).send({ message: 'Email is required' })
-      }
-
-      const user = await users_collection.findOne({ email })
-
-      if (!user) {
-        return res.status(401).send({ message: 'User not found' })
-      }
-
-      const token = jwt.sign(
-        { email: user.email, role: user.role },
-        process.env.JWT_SECRET,
-        { expiresIn: process.env.JWT_EXPIRES_IN }
-      )
-
-      res.send({ token })
-    })
-    //for admin all bookings
-    app.get(
-      '/admin/bookings',
-      verifyJWT,
-      verifyAdmin,
-      async (req, res) => {
-
-        const { paymentStatus, jobStatus } = req.query
-
-        const query = {}
-
-        if (paymentStatus) {
-          query.paymentStatus = paymentStatus
+      try {
+        const email = req.user?.email;
+        if (!email) return res.status(401).send({ message: 'Unauthorized' });
+        const user = await users_collection.findOne({ email });
+        if (!user || user.role !== 'admin') {
+          return res.status(403).send({ message: 'Forbidden: Admin only' });
         }
-
-        if (jobStatus) {
-          query.jobStatus = jobStatus
-        }
-
-        const bookings = await booking_payment_collection
-          .find(query)
-          .sort({ createdAt: -1 })
-          .toArray()
-
-        res.send(bookings)
+        next();
+      } catch (err) {
+        console.error('[admin] role check failed');
+        return res.status(500).send({ message: 'Internal Server Error' });
       }
-    )
-    //single bookings for admin
-    app.get(
-      '/admin/bookings/:id',
-      verifyJWT,
-      verifyAdmin,
-      async (req, res) => {
+    };
 
-        const id = req.params.id
+    app.use('/auth', createAuthRouter({ usersCollection: users_collection }));
 
-        const booking = await booking_payment_collection.findOne({
-          _id: new ObjectId(id)
-        })
+    // --- User Management ---
 
-        if (!booking) {
-          return res.status(404).send({ message: 'Booking not found' })
-        }
-
-        res.send(booking)
-      }
-    )
-    //user dashboard api
-    app.get(
-      '/user/bookings',
-      verifyJWT,
-      async (req, res) => {
-
-        const userEmail = req.user.email
-
-        const bookings = await booking_payment_collection
-          .find({ 'user.email': userEmail })
-          .sort({ createdAt: -1 })
-          .toArray()
-
-        res.send(bookings)
-      }
-    )
-    //single booking for user
-    app.get(
-      '/user/bookings/:id',
-      verifyJWT,
-      async (req, res) => {
-
-        const bookingId = req.params.id
-        const userEmail = req.user.email
-
-        const booking = await booking_payment_collection.findOne({
-          _id: new ObjectId(bookingId),
-          'user.email': userEmail
-        })
-
-        if (!booking) {
-          return res.status(404).send({ message: 'Booking not found' })
-        }
-
-        res.send(booking)
-      }
-    )
-
-
-
-    //room details api
-    app.get('/rooms', async (req, res) => {
-      const query = {}
-      const cursor = room_details_collection.find(query)
-      const result = await cursor.toArray()
-      res.send(result)
-    })
-
-    app.get('/rooms/:id', async (req, res) => {
-      const id = req.params.id
-
-      //  Prevent crash on invalid ObjectId
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).send({ message: 'Invalid room id' })
-      }
-
-      const room = await room_details_collection.findOne({
-        _id: new ObjectId(id)
-      })
-
-      if (!room) {
-        return res.status(404).send({ message: 'Room not found' })
-      }
-
-      res.send(room)
-    })
-
-    //users api
+    // ১. রেজিস্ট্রেশন
     app.post('/users', async (req, res) => {
-      const { name, email } = req.body
+      try {
+        const { name, email, password, photoUrl, role } = req.body
+        if (!email) return res.status(400).send({ message: 'Email is required' })
 
-      if (!email) {
-        return res.status(400).send({ message: 'Email is required' })
-      }
-
-      const existingUser = await users_collection.findOne({ email })
-
-      if (existingUser) {
-        return res.send({ message: 'User already exists' })
-      }
-
-      const user = {
-        name,
-        email,
-        role: 'user',
-        createdAt: new Date()
-      }
-
-      const result = await users_collection.insertOne(user)
-      res.send(result)
-    })
-
-    app.get('/users', verifyJWT, verifyAdmin, async (req, res) => {
-      const users = await users_collection.find().toArray()
-      res.send(users)
-    })
-
-    // Admin: add/promote a decorator
-    // Expects body: { email: string, name?: string, ... }
-    app.post('/admin/decorators', verifyJWT, verifyAdmin, async (req, res) => {
-      const { email, name, ...rest } = req.body || {}
-
-      if (!email) {
-        return res.status(400).send({ message: 'Email is required' })
-      }
-
-      const existing = await users_collection.findOne({ email })
-
-      // Avoid accidentally changing an admin account
-      if (existing?.role === 'admin') {
-        return res.status(400).send({ message: 'Cannot change admin role' })
-      }
-
-      if (!existing) {
-        const decoratorUser = {
-          name: name || null,
-          email,
-          role: 'decorator',
-          createdAt: new Date(),
-          decoratorProfile: { ...rest },
-          updatedAt: new Date()
-        }
-
-        const result = await users_collection.insertOne(decoratorUser)
-        return res.send({ ok: true, insertedId: result.insertedId })
-      }
-
-      if (existing.role === 'decorator') {
-        return res.status(409).send({ message: 'User is already a decorator' })
-      }
-
-      const updateDoc = {
-        role: 'decorator',
-        updatedAt: new Date()
-      }
-
-      if (name) updateDoc.name = name
-      if (Object.keys(rest).length > 0) updateDoc.decoratorProfile = { ...rest }
-
-      const result = await users_collection.updateOne(
-        { email },
-        {
-          $set: updateDoc,
-          $setOnInsert: { createdAt: new Date() }
-        },
-        { upsert: true }
-      )
-
-      res.send({ ok: true, modifiedCount: result.modifiedCount, upsertedId: result.upsertedId })
-    })
-
-
-
-
-
-
-    // decoretor apply api
-
-    app.post(
-      '/decorator/apply',
-      verifyJWT,
-      async (req, res) => {
-
-        const email = req.user.email
-        const applicationData = req.body
-
-        // prevent duplicate application
         const existing = await users_collection.findOne({ email })
+        if (existing) return res.status(409).send({ message: 'User already exists' })
 
-        if (existing?.role === 'decorator') {
-          return res.status(400).send({ message: 'Already a decorator' })
+        const newUser = {
+          name: name || '',
+          email,
+          password: password || null,
+          photoURL: photoUrl || '',
+          role: role || 'user',
+          createdAt: new Date()
         }
 
+        const result = await users_collection.insertOne(newUser)
+        const secret = process.env.JWT_SECRET
+        if (secret) {
+          const token = jwt.sign(
+            { id: result.insertedId.toString(), email, role: newUser.role },
+            secret,
+            { expiresIn: '7d' }
+          )
+          return res.status(201).send({ success: true, token, user: newUser })
+        }
+        res.status(201).send({ success: true, user: newUser })
+      } catch (err) {
+        console.error('[users] register error:', err.message)
+        res.status(500).send({ message: 'Internal Server Error' })
+      }
+    })
+
+    // ২. প্রোফাইল আপডেট
+    app.patch('/users/update/:email', requireAuth, async (req, res) => {
+      const email = req.params.email;
+      const { name, photoURL } = req.body;
+      if (req.user.email !== email) {
+        return res.status(403).send({ message: 'Forbidden' });
+      }
+      try {
         const result = await users_collection.updateOne(
           { email },
-          {
-            $set: {
-              decoratorApplication: {
-                ...applicationData,
-                status: 'pending',
-                appliedAt: new Date()
-              }
-            }
-          }
-        )
-
-        res.send({ message: 'Decorator application submitted' })
-      }
-    )
-
-    //decorator api
-
-
-
-    app.get("/decorator/jobs", verifyJWT, async (req, res) => {
-      try {
-        const decoratorEmail = req.query.decoratorEmail;
-
-        if (!decoratorEmail) {
-          return res.status(400).send({
-            message: "Decorator email is required"
-          });
+          { $set: { name, photoURL } }
+        );
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ success: false, message: 'User not found' });
         }
-
-        const jobs = await booking_payment_collection.find({
-          assignedDecoratorEmail: decoratorEmail
-        }).toArray();
-
-        res.send(jobs);
+        res.send({ success: true, message: 'Profile updated successfully' });
       } catch (error) {
-        res.status(500).send({
-          message: "Failed to fetch decorator jobs"
-        });
+        res.status(500).send({ success: false, message: 'Failed to update profile' });
       }
     });
 
-
-
-
-
-    //
-
-    app.patch(
-      '/decorator/job-status/:id',
-      verifyJWT,
-      verifyDecorator,
-      async (req, res) => {
-
-        const bookingId = req.params.id
-        const { status } = req.body
-        const decoratorEmail = req.user.email
-
-        const allowedStatuses = ['assigned', 'in-progress', 'completed']
-
-        if (!allowedStatuses.includes(status)) {
-          return res.status(400).send({ message: 'Invalid job status' })
-        }
-
-        const booking = await booking_payment_collection.findOne({
-          _id: new ObjectId(bookingId)
-        })
-
-        if (!booking) {
-          return res.status(404).send({ message: 'Booking not found' })
-        }
-
-        if (booking.decorator?.email !== decoratorEmail) {
-          return res.status(403).send({
-            message: 'Not your assigned job'
-          })
-        }
-
-        const validFlow = {
-          assigned: ['in-progress'],
-          'in-progress': ['completed'],
-          completed: []
-        }
-
-        if (!validFlow[booking.jobStatus]?.includes(status)) {
-          return res.status(400).send({
-            message: `Invalid status change from ${booking.jobStatus} to ${status}`
-          })
-        }
-
-        const updateData = {
-          jobStatus: status
-        }
-
-        if (status === 'in-progress') {
-          updateData.startedAt = new Date()
-        }
-
-        if (status === 'completed') {
-          updateData.completedAt = new Date()
-        }
-
-        const result = await booking_payment_collection.updateOne(
-          { _id: new ObjectId(bookingId) },
-          { $set: updateData }
-        )
-
-        res.send(result)
+    // ৩. নিজের info
+    app.get('/users/me', requireAuth, async (req, res) => {
+      try {
+        const email = req.user?.email;
+        const user = await users_collection.findOne(
+          { email },
+          { projection: { name: 1, email: 1, role: 1, photoURL: 1 } }
+        );
+        if (!user) return res.status(404).send({ message: 'User not found' });
+        res.status(200).send(user);
+      } catch (err) {
+        res.status(500).send({ message: 'Internal Server Error' });
       }
-    )
+    });
 
+    // ✅ ৪. Chat এর জন্য contact list — decorator ও admin
+    app.get('/users/contacts', requireAuth, async (req, res) => {
+      try {
+        const role = req.user?.role
 
-
-    //assign decorator to booking only through admin
-    app.patch(
-      '/bookings/assign-decorator/:id',
-      verifyJWT,
-      verifyAdmin,
-      async (req, res) => {
-
-        const bookingId = req.params.id
-        const { decoratorEmail } = req.body
-
-        if (!decoratorEmail) {
-          return res.status(400).send({ message: 'Decorator email required' })
+        let query = {}
+        if (role === 'user') {
+          // user শুধু decorator ও admin দেখবে
+          query = {
+            role: { $in: ['decorator', 'admin'] },
+            email: { $ne: req.user.email }
+          }
+        } else if (role === 'decorator') {
+          // decorator সব user ও admin দেখবে
+          query = {
+            role: { $in: ['user', 'admin'] },
+            email: { $ne: req.user.email }
+          }
+        } else if (role === 'admin') {
+          // admin সবাইকে দেখবে
+          query = {
+            email: { $ne: req.user.email }
+          }
         }
 
-        const booking = await booking_payment_collection.findOne({
-          _id: new ObjectId(bookingId)
+        const contacts = await users_collection.find(
+          query,
+          { projection: { name: 1, email: 1, role: 1, photoURL: 1 } }
+        ).toArray()
+
+        res.send(contacts)
+      } catch (err) {
+        console.error('[contacts] error:', err.message)
+        res.status(500).send({ message: 'Internal Server Error' })
+      }
+    })
+
+    // --- Chat API ---
+
+    // Start conversation
+    app.post('/chat/conversations/start', requireAuth, async (req, res) => {
+      try {
+        const { decoratorId, decoratorName, participantId, participantName } = req.body;
+        const userEmail = req.user.email;
+        const targetEmail = participantId || decoratorId
+        const targetName = participantName || decoratorName || 'Participant'
+
+        if (!targetEmail) {
+          return res.status(400).send({ message: 'participantId is required' })
+        }
+
+        const existing = await chat_collection.findOne({
+          participants: { $all: [userEmail, targetEmail] }
+        });
+        if (existing) return res.send(existing);
+
+        const newConversation = {
+          participants: [userEmail, targetEmail],
+          user: { email: userEmail, name: req.user.name || '' },
+          decorator: { email: targetEmail, name: targetName },
+          messages: [],
+          lastUpdated: new Date(),
+          unreadCount: 0
+        };
+
+        const result = await chat_collection.insertOne(newConversation);
+        res.status(201).send({ ...newConversation, _id: result.insertedId });
+      } catch (err) {
+        console.error('[chat] start error:', err.message)
+        res.status(500).send({ message: 'Internal Server Error' })
+      }
+    });
+
+    // Get all conversations
+    app.get('/chat/conversations', requireAuth, async (req, res) => {
+      try {
+        const email = req.user.email;
+        const result = await chat_collection.find({
+          participants: email
+        }).sort({ lastUpdated: -1 }).toArray();
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: 'Internal Server Error' })
+      }
+    });
+
+    // Get single conversation
+    app.get('/chat/conversations/:id', requireAuth, async (req, res) => {
+      try {
+        const { id } = req.params
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: 'Invalid conversation ID' })
+        }
+        const conversation = await chat_collection.findOne({
+          _id: new ObjectId(id),
+          participants: req.user.email
         })
-
-        if (!booking) {
-          return res.status(404).send({ message: 'Booking not found' })
+        if (!conversation) {
+          return res.status(404).send({ message: 'Conversation not found' })
         }
+        res.send(conversation)
+      } catch (err) {
+        res.status(500).send({ message: 'Internal Server Error' })
+      }
+    });
 
-        if (booking.paymentStatus !== 'paid') {
-          return res.status(400).send({
-            message: 'Payment not completed'
-          })
-        }
+    // Send message
+    app.post('/chat/conversations/:id/messages', requireAuth, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { text } = req.body;
+        const senderEmail = req.user.email;
 
-        const decorator = await users_collection.findOne({
-          email: decoratorEmail,
-          role: 'decorator'
-        })
+        if (!ObjectId.isValid(id)) return res.status(400).send({ message: 'Invalid ID' });
+        if (!text?.trim()) return res.status(400).send({ message: 'Message text is required' });
 
-        if (!decorator) {
-          return res.status(404).send({
-            message: 'Decorator not found'
-          })
-        }
+        const newMessage = {
+          sender: senderEmail,
+          text: text.trim(),
+          timestamp: new Date(),
+          read: false
+        };
 
-        const result = await booking_payment_collection.updateOne(
-          { _id: new ObjectId(bookingId) },
+        const result = await chat_collection.updateOne(
+          { _id: new ObjectId(id), participants: senderEmail },
           {
-            $set: {
-              decorator: {
-                email: decorator.email,
-                name: decorator.name
-              },
-              jobStatus: 'assigned',
-              assignedAt: new Date()
-            }
+            $push: { messages: newMessage },
+            $set: { lastUpdated: new Date() },
+            $inc: { unreadCount: 1 }
           }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ message: 'Conversation not found' })
+        }
+        res.send(newMessage);
+      } catch (err) {
+        res.status(500).send({ message: 'Internal Server Error' })
+      }
+    });
+
+    // Mark as read
+    app.put('/chat/conversations/:id/read', requireAuth, async (req, res) => {
+      try {
+        const { id } = req.params
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: 'Invalid conversation ID' })
+        }
+        await chat_collection.updateOne(
+          { _id: new ObjectId(id), participants: req.user.email },
+          { $set: { unreadCount: 0, 'messages.$[].read': true } }
         )
-
-        res.send(result)
+        res.send({ success: true })
+      } catch (err) {
+        res.status(500).send({ message: 'Internal Server Error' })
       }
-    )
+    });
 
-
-
-
-    //api for decorator dashboard
-    app.get(
-      '/decorator/jobs',
-      verifyJWT,
-      verifyDecorator,
-      async (req, res) => {
-
-        const decoratorEmail = req.user.email
-        const status = req.query.status
-
-        const query = { 'decorator.email': decoratorEmail }
-
-        if (status) {
-          query.jobStatus = status
+    // Delete conversation
+    app.delete('/chat/conversations/:id', requireAuth, async (req, res) => {
+      try {
+        const { id } = req.params
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: 'Invalid conversation ID' })
         }
-
-        const jobs = await booking_payment_collection.find(query).toArray()
-        res.send(jobs)
-      }
-    )
-    //job status update by decorator
-    app.patch(
-      '/decorator/job-status/:id',
-      verifyJWT,
-      verifyDecorator,
-      async (req, res) => {
-
-        const bookingId = req.params.id
-        const { status } = req.body
-        const decoratorEmail = req.user.email
-
-        const allowedStatuses = ['assigned', 'in-progress', 'completed']
-
-        if (!allowedStatuses.includes(status)) {
-          return res.status(400).send({ message: 'Invalid job status' })
-        }
-
-        // Find booking
-        const booking = await booking_payment_collection.findOne({
-          _id: new ObjectId(bookingId)
+        const result = await chat_collection.deleteOne({
+          _id: new ObjectId(id),
+          participants: req.user.email
         })
-
-        if (!booking) {
-          return res.status(404).send({ message: 'Booking not found' })
+        if (result.deletedCount === 0) {
+          return res.status(404).send({ message: 'Conversation not found' })
         }
+        res.send({ success: true, message: 'Conversation deleted' })
+      } catch (err) {
+        res.status(500).send({ message: 'Internal Server Error' })
+      }
+    });
 
-        //  Ensure booking is assigned to this decorator
-        if (booking.decorator?.email !== decoratorEmail) {
-          return res.status(403).send({
-            message: 'Forbidden: Not your assigned job'
-          })
+    // --- Favourites ---
+    app.post('/favourites', requireAuth, async (req, res) => {
+      try {
+        const userEmail = req.user.email;
+        const { itemId, itemType, name, price, image } = req.body;
+        if (!itemId) return res.status(400).send({ message: 'itemId is required' });
+
+        const existing = await favourites_collection.findOne({ itemId, userEmail });
+        if (existing) return res.status(409).send({ message: 'Already in favourites' });
+
+        const favouriteData = {
+          itemId, itemType: itemType || 'service',
+          name, price, image, userEmail, addedAt: new Date()
+        };
+        const result = await favourites_collection.insertOne(favouriteData);
+        res.status(201).send({ ...favouriteData, _id: result.insertedId });
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to add favourite' });
+      }
+    });
+
+    app.get('/favourites', requireAuth, async (req, res) => {
+      const result = await favourites_collection.find({ userEmail: req.user.email }).toArray();
+      res.send(result);
+    });
+
+    app.delete('/favourites/:id', requireAuth, async (req, res) => {
+      const { id } = req.params;
+      if (!ObjectId.isValid(id)) return res.status(400).send({ message: 'Invalid id' });
+      const result = await favourites_collection.deleteOne({
+        _id: new ObjectId(id), userEmail: req.user.email
+      });
+      res.send(result);
+    });
+
+    // --- Rooms ---
+    app.get('/rooms', async (req, res) => {
+      const result = await room_details_collection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/rooms/:id', async (req, res) => {
+      try {
+        const { id } = req.params
+        if (!ObjectId.isValid(id)) return res.status(400).send({ message: 'Invalid room ID' })
+        const room = await room_details_collection.findOne({ _id: new ObjectId(id) })
+        if (!room) return res.status(404).send({ message: 'Room not found' })
+        res.send(room)
+      } catch (err) {
+        res.status(500).send({ message: 'Internal Server Error' })
+      }
+    })
+
+    // --- Bookings ---
+    app.get('/user/bookings', requireAuth, async (req, res) => {
+      try {
+        const email = req.user.email
+        const bookings = await booking_payment_collection.find({
+          $or: [
+            { 'user.email': email },
+            { userEmail: email },
+            { email: email },
+          ]
+        }).toArray();
+        res.send(bookings);
+      } catch (err) {
+        res.status(500).send({ message: 'Internal Server Error' })
+      }
+    });
+
+    app.post('/bookings', requireAuth, async (req, res) => {
+      try {
+        const bookingData = {
+          ...req.body,
+          user: { ...(req.body.user || {}), email: req.user.email },
+          userId: req.user.id ? new ObjectId(req.user.id) : null,
+          paymentStatus: 'pending',
+          status: 'Pending',
+          createdAt: new Date()
+        };
+        const result = await booking_payment_collection.insertOne(bookingData);
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Booking failed" });
+      }
+    });
+
+    // --- Payment ---
+    app.post('/create-payment-intent', requireAuth, async (req, res) => {
+      try {
+        if (!stripe) return res.status(503).send({ message: 'Payment service unavailable' })
+        const { amount, bookingId } = req.body
+        if (!amount || !bookingId) {
+          return res.status(400).send({ message: 'Amount and bookingId are required' })
         }
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: Math.round(amount),
+          currency: 'usd',
+          metadata: { bookingId: bookingId.toString(), userEmail: req.user.email }
+        })
+        res.send({ clientSecret: paymentIntent.client_secret })
+      } catch (err) {
+        console.error('[payment] intent error:', err.message)
+        res.status(500).send({ message: 'Failed to create payment intent' })
+      }
+    })
 
-        // Validate status flow
-        const currentStatus = booking.jobStatus
-
-        const validFlow = {
-          assigned: ['in-progress'],
-          in_progress: ['completed'],
-          completed: []
+    app.patch('/payments/confirm/:bookingId', requireAuth, async (req, res) => {
+      try {
+        const { bookingId } = req.params
+        const { transactionId } = req.body
+        if (!ObjectId.isValid(bookingId)) {
+          return res.status(400).send({ message: 'Invalid booking ID' })
         }
-
-        if (!validFlow[currentStatus]?.includes(status)) {
-          return res.status(400).send({
-            message: `Invalid status transition from ${currentStatus} to ${status}`
-          })
-        }
-
-        // Update job status
-        const updateData = {
-          jobStatus: status
-        }
-
-        if (status === 'in-progress') {
-          updateData.startedAt = new Date()
-        }
-
-        if (status === 'completed') {
-          updateData.completedAt = new Date()
-        }
-
         const result = await booking_payment_collection.updateOne(
           { _id: new ObjectId(bookingId) },
-          { $set: updateData }
+          { $set: { status: 'Confirmed', paymentStatus: 'paid', transactionId, paidAt: new Date() } }
         )
-
-        res.send(result)
-      }
-    )
-
-
-
-
-    //paymentbooking api
-
-    app.post('/create-payment-intent', verifyJWT, async (req, res) => {
-      const { amount } = req.body
-
-      if (!amount || amount < 1) {
-        return res.status(400).send({
-          message: 'Amount must be at least $1'
-        })
-      }
-
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: amount * 100, // cents
-        currency: 'usd',
-        payment_method_types: ['card']
-      })
-
-      res.send({
-        clientSecret: paymentIntent.client_secret
-      })
-    })
-    //// create booking (payment pending)
-    app.post('/bookings', verifyJWT, async (req, res) => {
-      const emailFromToken = req.user.email
-      const { name, roomId, roomName, price } = req.body
-
-      if (!emailFromToken || !roomId || !roomName || !price) {
-        return res.status(400).send({
-          message: 'Missing required booking information'
-        })
-      }
-
-      const bookingData = {
-        user: {
-          name,
-          email: emailFromToken   //  FIXED
-        },
-        roomId,
-        roomName,
-        price,
-
-        paymentStatus: 'pending',
-        transactionId: null,
-
-        jobStatus: 'pending',     //  ADD THIS
-        decorator: null,
-
-        createdAt: new Date(),
-        paidAt: null
-      }
-
-      const result = await booking_payment_collection.insertOne(bookingData)
-      res.send(result)
-    })
-
-
-
-
-
-    app.patch('/users/role/:id', verifyJWT, verifyAdmin, async (req, res) => {
-      const id = req.params.id
-      const { role } = req.body
-
-      const result = await users_collection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { role } }
-      )
-
-      res.send(result)
-    })
-    //confirmed
-    app.patch('/payments/confirm/:id', verifyJWT, async (req, res) => {
-      const { id } = req.params
-      const { transactionId } = req.body
-
-      const existing = await booking_payment_collection.findOne({
-        _id: new ObjectId(id)
-      })
-
-      //  Prevent double payment
-      if (existing?.paymentStatus === 'paid') {
-        return res.status(400).send({ message: 'Payment already completed' })
-      }
-
-      const result = await booking_payment_collection.updateOne(
-        { _id: new ObjectId(id) },
-        {
-          $set: {
-            paymentStatus: 'paid',
-            transactionId,
-            paidAt: new Date()
-          }
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ message: 'Booking not found' })
         }
-      )
-
-      res.send(result)
+        res.send({ success: true, message: 'Payment confirmed' })
+      } catch (err) {
+        console.error('[payment] confirm error:', err.message)
+        res.status(500).send({ message: 'Failed to confirm payment' })
+      }
     })
 
-    //api for booking and pending
-    app.get('/bookings/:email', async (req, res) => {
-      const email = req.params.email
-      const result = await booking_payment_collection
-        .find({ 'user.email': email })
-        .toArray()
-
-      res.send(result)
-    })
-
-
-    // Send a ping to confirm a successful connection
-    // await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
+    console.log("Connected to MongoDB!");
+  } catch (error) {
+    console.error("MongoDB Connection Error:", error);
   }
 }
+
 run().catch(console.dir);
 
-
 app.get('/', (req, res) => {
-  res.send('hey bhai')
-})
+  res.send('StyleDecor Server is Running');
+});
 
-// Vercel runs this as a Serverless Function; do not call listen() there.
+app.use((err, req, res, next) => {
+  console.error('[error]:', err.message);
+  res.status(500).send({ message: 'Internal Server Error' });
+});
+
 if (!process.env.VERCEL) {
-  app.listen(port, () => {
-    console.log(`Example app listening on port ${port}`)
-  })
+  app.listen(port, () => console.log(`Server listening on port ${port}`));
 }
 
-module.exports = app
+module.exports = app;
