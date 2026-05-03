@@ -361,14 +361,14 @@ async function run() {
     })
 
     // --- Bookings ---
-    app.get('/user/bookings', requireAuth, async (req, res) => {
+    app.get('/user/bookings', requireAuth, async (req, res) => {    
       try {
         const email = req.user.email
         const bookings = await booking_payment_collection.find({
           $or: [
             { 'user.email': email },
             { userEmail: email },
-            { email: email },
+            { email: email },      
           ]
         }).toArray();
         res.send(bookings);
