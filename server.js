@@ -3,7 +3,7 @@
 process.env.VERCEL = process.env.VERCEL || '1'
 
 const app = require('./index')
-
+              
 const port = process.env.PORT || 3000
 app.listen(port, () => {
   console.log(`Server listening on port ${port}`)
